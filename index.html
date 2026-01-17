@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>ROOM 1001 Screen Monitor</title>
+
+<style>
+body{margin:0;font-family:Segoe UI,Orbitron,sans-serif;background:#0b0f14;color:#cfd8dc}
+.hidden{display:none}
+
+/* 生徒 */
+.student-overlay{
+  position:fixed;top:12px;right:12px;z-index:9999;
+  background:rgba(0,0,0,.65);backdrop-filter:blur(6px);
+  padding:10px 14px;border-radius:12px;color:#fff
+}
+.student-overlay button{
+  background:#1abc9c;border:none;border-radius:6px;
+  padding:4px 10px;cursor:pointer
+}
+
+/* 教師（MR32風） */
+.header{padding:12px;font-size:18px}
+.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:12px}
+.card{
+  background:#111821;border-radius:14px;padding:6px;
+  box-shadow:0 0 12px rgba(0,255,255,.15);
+  cursor:pointer;position:relative
+}
+.card::after{
+  content:"";position:absolute;inset:0;border-radius:14px;
+  border:1px solid rgba(0,255,255,.25)
+}
+video{width:100%;border-radius:10px}
+.empty{display:flex;align-items:center;justify-content:center;color:#555}
+
+/* 拡大 */
+#modal{
+  position:fixed;inset:0;background:rgba(0,0,0,.85);
+  display:none;align-items:center;justify-content:center;z-index:99999
+}
+#modal video{width:90vw;border-radius:14px}
+</style>
+</head>
+<body>
+
+<!-- 生徒UI -->
+<div id="studentUI" class="hidden">
+  <div class="student-overlay">
+    🔴 共有中 <button id="stopBtn">停止</button>
+  </div>
+  <button id="shareBtn" style="margin:20px">画面共有開始</button>
+</div>
+
+<!-- 教師UI -->
+<div id="teacherUI" class="hidden">
+  <div class="header">
+    MR32 MONITOR / ROOM 1001 /
+    <span id="count">0</span> / 10
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+
+<div id="modal"><video autoplay muted></video></div>
+
+<!-- Firebase v9 -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+import {
+  getFirestore, collection, doc, addDoc, setDoc, updateDoc,
+  deleteDoc, onSnapshot, getDocs
+} from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
+
+/* ===== Firebase設定（あなたのもの） ===== */
+const firebaseConfig = {
+  apiKey: "AIzaSyCRQ5pSeJvbKK5DvC1EgXfbhQtaoYJqLGY",
+  authDomain: "camera-e79ae.firebaseapp.com",
+  projectId: "camera-e79ae",
+  storageBucket: "camera-e79ae.firebasestorage.app",
+  messagingSenderId: "1082664912864",
+  appId: "1:1082664912864:web:7f574e0c101ef5a36dcd85",
+  measurementId: "G-C8BMTM0BJV"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+/* ===== 共通 ===== */
+const ROOM_ID = "1001";
+const role = new URLSearchParams(location.search).get("role");
+const rtcConfig = { iceServers:[{urls:"stun:stun.l.google.com:19302"}] };
+
+/* ===== 生徒 ===== */
+if(role === "student"){
+  studentUI.classList.remove("hidden");
+  let pc, stream, roomDoc;
+
+  shareBtn.onclick = async () => {
+    const snap = await getDocs(collection(db, `rooms/${ROOM_ID}/students`));
+    if(snap.size >= 10){ alert("満員"); return; }
+
+    stream = await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
+    pc = new RTCPeerConnection(rtcConfig);
+    stream.getTracks().forEach(t=>pc.addTrack(t,stream));
+
+    roomDoc = await addDoc(collection(db, `rooms/${ROOM_ID}/students`), {});
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await updateDoc(roomDoc, { offer });
+
+    onSnapshot(roomDoc, async s=>{
+      const d=s.data();
+      if(d?.answer && !pc.currentRemoteDescription){
+        await pc.setRemoteDescription(d.answer);
+      }
+    });
+
+    pc.onicecandidate = e=>{
+      e.candidate && addDoc(collection(roomDoc,"candidates"), e.candidate.toJSON());
+    };
+
+    stopBtn.onclick = ()=>{
+      stream.getTracks().forEach(t=>t.stop());
+      deleteDoc(roomDoc);
+      pc.close();
+    };
+  };
+}
+
+/* ===== 教師 ===== */
+if(role === "teacher"){
+  teacherUI.classList.remove("hidden");
+  const modal = document.getElementById("modal");
+  const modalVideo = modal.querySelector("video");
+
+  onSnapshot(collection(db, `rooms/${ROOM_ID}/students`), snap=>{
+    grid.innerHTML="";
+    count.textContent = snap.size;
+
+    snap.forEach(docSnap=>{
+      const pc = new RTCPeerConnection(rtcConfig);
+      const card = document.createElement("div");
+      card.className="card";
+      const video = document.createElement("video");
+      video.autoplay=true; video.muted=true;
+      card.appendChild(video);
+      grid.appendChild(card);
+
+      card.onclick=()=>{
+        modalVideo.srcObject = video.srcObject;
+        modal.style.display="flex";
+      };
+
+      pc.ontrack = e=> video.srcObject=e.streams[0];
+      pc.onicecandidate = e=>{
+        e.candidate && addDoc(collection(docSnap.ref,"candidates"), e.candidate.toJSON());
+      };
+
+      pc.setRemoteDescription(docSnap.data().offer).then(async()=>{
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await updateDoc(docSnap.ref,{answer});
+      });
+
+      onSnapshot(collection(docSnap.ref,"candidates"), cs=>{
+        cs.docChanges().forEach(c=>{
+          pc.addIceCandidate(c.doc.data());
+        });
+      });
+    });
+
+    for(let i=snap.size;i<10;i++){
+      const e=document.createElement("div");
+      e.className="card empty"; e.textContent="EMPTY";
+      grid.appendChild(e);
+    }
+  });
+
+  modal.onclick=()=>modal.style.display="none";
+}
+</script>
+</body>
+</html>
